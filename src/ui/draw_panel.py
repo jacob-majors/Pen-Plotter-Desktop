@@ -1,18 +1,10 @@
 """
 draw_panel.py — Unified Draw tab.
 
-Layout (left → right):
-  ToolColumn  (44 px)  — narrow icon-only column, Inkscape-style
-  PatternsPanel(190 px) — pattern card list, old-preset-panel style
-  DrawCanvas  (flex)   — drawing surface
-  RightPanel  (190 px) — stats, plot progress, Plot button
+Layout: ToolColumn (44 px) | Canvas (flex) | RightPanel (230 px)
+RightPanel: PATTERNS list (top, scrollable) + STATS + PLOT (bottom)
 
-Toolbar (top): Undo · Clear · Paper size · Save · Load · Import SVG
-
-Keyboard:
-  Ctrl+Z  undo           Enter     finish polyline
-  Ctrl+S  save           Escape    cancel current shape
-  Ctrl+O  load           Shift     constrain (45°/square/circle)
+Toolbar: Undo · Clear · Paper size · Save · Load · Import SVG
 """
 from __future__ import annotations
 import json
@@ -24,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QComboBox, QButtonGroup,
-    QAbstractItemView, QSizePolicy,
+    QAbstractItemView,
 )
 from PySide6.QtCore import Qt, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import (
@@ -40,18 +32,18 @@ from core.presets import (
 )
 from core.svg_import import parse_svg
 
-BG    = QColor("#18181b")
+BG    = QColor("#1e1e1e")
 PAPER = QColor("#fafaf8")
-GRID  = QColor("#dce1e8")
-INK   = QColor("#1e293b")
-LIVE  = QColor("#3b82f6")
-PAD   = 24
+GRID  = QColor("#e0e4ea")
+INK   = QColor("#1a1a1a")
+LIVE  = QColor("#2680eb")
+PAD   = 28
 
 TOOLS = [
-    ("pen",     "Pen  — drag to draw freehand"),
-    ("polyline","Polyline  — click points, dbl-click or Enter to finish"),
-    ("rect",    "Rectangle  — drag, Shift = square"),
-    ("ellipse", "Ellipse  — drag, Shift = circle"),
+    ("pen",     "Pen — drag to draw freehand  (P)"),
+    ("polyline","Polyline — click points, dbl-click to finish  (L)"),
+    ("rect",    "Rectangle — drag, Shift = square  (R)"),
+    ("ellipse", "Ellipse — drag, Shift = circle  (E)"),
 ]
 
 PRESETS = [
@@ -77,15 +69,14 @@ PAPER_PRESETS = [
 ]
 
 
-# ── icon painters ─────────────────────────────────────────────────────────────
+# ── icon renderers ────────────────────────────────────────────────────────────
 
-def _tool_icon(tool: str, size: int = 22) -> QIcon:
-    """Programmatically drawn vector icon for each tool."""
+def _tool_icon(tool: str, size: int = 20) -> QIcon:
     pix = QPixmap(size, size)
     pix.fill(QColor(0, 0, 0, 0))
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    c = QColor("#c0c8d4")
+    c = QColor("#b8bec8")
     pen = QPen(c, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.NoBrush)
@@ -96,16 +87,14 @@ def _tool_icon(tool: str, size: int = 22) -> QIcon:
         path.moveTo(m, s - m)
         path.cubicTo(m + 1, s * 0.4, s - m - 1, s * 0.6, s - m, m)
         p.drawPath(path)
-        p.setBrush(QBrush(c))
-        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(c)); p.setPen(Qt.NoPen)
         p.drawEllipse(s - m - 2, m - 1, 3, 3)
 
     elif tool == "polyline":
         pts = [(m, s-m), (m+3, s//2-1), (s-m-3, s//2+2), (s-m, m)]
         for i in range(1, len(pts)):
             p.drawLine(pts[i-1][0], pts[i-1][1], pts[i][0], pts[i][1])
-        p.setBrush(QBrush(c))
-        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(c)); p.setPen(Qt.NoPen)
         for x, y in pts:
             p.drawEllipse(x - 2, y - 2, 4, 4)
 
@@ -119,48 +108,36 @@ def _tool_icon(tool: str, size: int = 22) -> QIcon:
     return QIcon(pix)
 
 
-def _pattern_icon(char: str, color: str, size: int = 24) -> QIcon:
+def _preset_dot(char: str, color: str, size: int = 22) -> QIcon:
     pix = QPixmap(size, size)
     pix.fill(QColor(0, 0, 0, 0))
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    bg = QColor(color)
-    bg.setAlpha(38)
-    p.setBrush(QBrush(bg))
-    p.setPen(Qt.NoPen)
-    p.drawRoundedRect(2, 2, size - 4, size - 4, 4, 4)
+    bg = QColor(color); bg.setAlpha(35)
+    p.setBrush(QBrush(bg)); p.setPen(Qt.NoPen)
+    p.drawRoundedRect(2, 2, size-4, size-4, 4, 4)
     p.setPen(QPen(QColor(color)))
-    p.setFont(QFont("Arial", int(size * 0.5), QFont.Bold))
+    p.setFont(QFont("Arial", int(size * 0.46), QFont.Bold))
     p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, char)
     p.end()
     return QIcon(pix)
 
 
-# ── narrow Inkscape-style tool column ─────────────────────────────────────────
-
-_TOOL_BTN = """
-    QPushButton {{
-        border: none;
-        border-radius: 6px;
-        background: transparent;
-        padding: 0;
-    }}
-    QPushButton:hover   {{ background: #2d2d2d; }}
-    QPushButton:checked {{ background: #1e3a5f; border: 1px solid #3b82f6; }}
-"""
-
+# ── narrow tool column ────────────────────────────────────────────────────────
 
 class ToolColumn(QWidget):
     tool_changed = Signal(str)
 
-    def __init__(self, canvas_undo, canvas_clear):
+    def __init__(self):
         super().__init__()
         self.setFixedWidth(44)
-        self.setStyleSheet("background:#161618; border-right:1px solid #2d2d2d;")
+        self.setStyleSheet(
+            "background: #252525; border-right: 1px solid #111;"
+        )
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 12, 4, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(4, 14, 4, 14)
+        lay.setSpacing(3)
 
         group = QButtonGroup(self)
         self._btns: dict[str, QPushButton] = {}
@@ -169,41 +146,25 @@ class ToolColumn(QWidget):
             btn = QPushButton()
             btn.setCheckable(True)
             btn.setFixedSize(36, 36)
-            btn.setIcon(_tool_icon(key, size=22))
-            btn.setIconSize(QSize(22, 22))
+            btn.setIcon(_tool_icon(key, size=20))
+            btn.setIconSize(QSize(20, 20))
             btn.setToolTip(tip)
-            btn.setStyleSheet(_TOOL_BTN)
+            btn.setStyleSheet("""
+                QPushButton {
+                    border: none;
+                    border-radius: 4px;
+                    background: transparent;
+                    padding: 0;
+                }
+                QPushButton:hover   { background: #353535; }
+                QPushButton:checked { background: #1a3a5a; border: 1px solid #2680eb; }
+            """)
             btn.clicked.connect(lambda _, t=key: self.tool_changed.emit(t))
             group.addButton(btn)
             lay.addWidget(btn, alignment=Qt.AlignHCenter)
             self._btns[key] = btn
 
         self._btns["pen"].setChecked(True)
-
-        # thin separator before utility buttons
-        lay.addSpacing(6)
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:#2d2d2d;")
-        sep.setFixedHeight(1)
-        lay.addWidget(sep)
-        lay.addSpacing(6)
-
-        for symbol, tip, fn in [
-            ("↩", "Undo  (Ctrl+Z)", canvas_undo),
-            ("✕", "Clear canvas",   canvas_clear),
-        ]:
-            btn = QPushButton(symbol)
-            btn.setFixedSize(36, 36)
-            btn.setToolTip(tip)
-            btn.setStyleSheet("""
-                QPushButton { border:none; border-radius:6px; background:transparent;
-                              color:#6b7280; font-size:14px; }
-                QPushButton:hover { background:#2d2d2d; color:#d1d5db; }
-            """)
-            btn.clicked.connect(fn)
-            lay.addWidget(btn, alignment=Qt.AlignHCenter)
-
         lay.addStretch()
 
     def select_tool(self, tool: str):
@@ -211,142 +172,148 @@ class ToolColumn(QWidget):
             self._btns[tool].setChecked(True)
 
 
-# ── patterns panel ────────────────────────────────────────────────────────────
-
-_LIST_STYLE = """
-    QListWidget { background:transparent; border:none; outline:none; }
-    QListWidget::item { padding:0; border-bottom:1px solid #222; }
-    QListWidget::item:selected { background:#262626; border-left:3px solid #3b82f6; }
-    QListWidget::item:hover:!selected { background:#212121; }
-"""
-
-
-class PatternsPanel(QWidget):
-    pattern_selected = Signal(int)
-
-    def __init__(self):
-        super().__init__()
-        self.setFixedWidth(190)
-        self.setStyleSheet("background:#1a1a1a; border-right:1px solid #2d2d2d;")
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-
-        hdr = QLabel("  PATTERNS")
-        hdr.setFixedHeight(36)
-        hdr.setStyleSheet(
-            "font-size:10px; font-weight:bold; color:#6b7280; letter-spacing:2px;"
-            "border-bottom:1px solid #2d2d2d; padding-left:4px;"
-        )
-        lay.addWidget(hdr)
-
-        self._list = QListWidget()
-        self._list.setStyleSheet(_LIST_STYLE)
-        self._list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._list.setFocusPolicy(Qt.NoFocus)
-
-        for name, icon_char, color, _ in PRESETS:
-            item = QListWidgetItem()
-            item.setSizeHint(QSize(190, 44))
-            item.setIcon(_pattern_icon(icon_char, color, size=24))
-            item.setText(f"  {name}")
-            item.setFont(QFont("Arial", 12))
-            self._list.addItem(item)
-
-        self._list.itemClicked.connect(
-            lambda item: self.pattern_selected.emit(self._list.row(item))
-        )
-        lay.addWidget(self._list, stretch=1)
-
-        note = QLabel("  Click to add to canvas")
-        note.setStyleSheet("color:#3d3d3d; font-size:10px; padding:4px 0;")
-        lay.addWidget(note)
-
-
-# ── right panel ───────────────────────────────────────────────────────────────
+# ── right panel: patterns + stats + plot ─────────────────────────────────────
 
 class RightPanel(QWidget):
+    pattern_selected = Signal(int)
     plot_requested   = Signal()
     cancel_requested = Signal()
 
     def __init__(self, plotter=None):
         super().__init__()
         self._plotter = plotter
-        self.setFixedWidth(190)
-        self.setStyleSheet("background:#1a1a1a; border-left:1px solid #2d2d2d;")
+        self.setFixedWidth(230)
+        self.setStyleSheet(
+            "background: #252525; border-left: 1px solid #111;"
+        )
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(10)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        def hdr(text):
-            lbl = QLabel(text)
-            lbl.setStyleSheet(
-                "font-size:10px; font-weight:bold; color:#6b7280; letter-spacing:1px;"
-            )
-            lay.addWidget(lbl)
-            sep = QFrame()
-            sep.setFrameShape(QFrame.HLine)
-            sep.setFixedHeight(1)
-            sep.setStyleSheet("background:#2d2d2d;")
-            lay.addWidget(sep)
+        # ── Patterns ─────────────────────────────────────────────────────────
+        root.addWidget(self._section_hdr("PATTERNS"))
 
-        hdr("STATS")
-        self.lbl_paths    = QLabel("Paths\n—")
-        self.lbl_distance = QLabel("Distance\n—")
-        self.lbl_time     = QLabel("Est. time\n—")
+        self._patt_list = QListWidget()
+        self._patt_list.setStyleSheet("""
+            QListWidget { background: transparent; border: none; outline: none; }
+            QListWidget::item { padding: 0; border-bottom: 1px solid #1a1a1a; }
+            QListWidget::item:selected { background: #1a3a5c; border-left: 2px solid #2680eb; }
+            QListWidget::item:hover:!selected { background: #2a2a2a; }
+        """)
+        self._patt_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._patt_list.setFocusPolicy(Qt.NoFocus)
+
+        for name, ch, color, _ in PRESETS:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(230, 38))
+            item.setIcon(_preset_dot(ch, color, size=22))
+            item.setText(f"  {name}")
+            item.setFont(QFont("Arial", 11))
+            self._patt_list.addItem(item)
+
+        self._patt_list.itemClicked.connect(
+            lambda item: self.pattern_selected.emit(self._patt_list.row(item))
+        )
+        root.addWidget(self._patt_list, stretch=1)
+
+        hint = QLabel("  click to add to canvas")
+        hint.setStyleSheet("color: #333; font-size: 10px; padding: 3px 0;")
+        root.addWidget(hint)
+
+        # ── separator ─────────────────────────────────────────────────────────
+        root.addWidget(self._hsep())
+
+        # ── Stats ─────────────────────────────────────────────────────────────
+        root.addWidget(self._section_hdr("STATS"))
+
+        stats_w = QWidget()
+        stats_w.setStyleSheet("background: transparent;")
+        sl = QVBoxLayout(stats_w)
+        sl.setContentsMargins(14, 6, 14, 8)
+        sl.setSpacing(4)
+
+        self.lbl_paths    = QLabel("Paths     —")
+        self.lbl_distance = QLabel("Distance  —")
+        self.lbl_time     = QLabel("Est. time —")
         for l in (self.lbl_paths, self.lbl_distance, self.lbl_time):
-            l.setStyleSheet("color:#d1d5db; font-size:12px;")
-            lay.addWidget(l)
+            l.setStyleSheet(
+                "color: #c0c0c0; font-size: 11px; font-family: monospace;"
+            )
+            sl.addWidget(l)
+        root.addWidget(stats_w)
 
-        lay.addSpacing(6)
-        hdr("PROGRESS")
+        # ── Plot ──────────────────────────────────────────────────────────────
+        root.addWidget(self._hsep())
+
+        plot_w = QWidget()
+        plot_w.setStyleSheet("background: transparent;")
+        pl = QVBoxLayout(plot_w)
+        pl.setContentsMargins(10, 8, 10, 12)
+        pl.setSpacing(6)
 
         self.prog_bar = QProgressBar()
         self.prog_bar.setVisible(False)
-        self.prog_bar.setFixedHeight(10)
-        lay.addWidget(self.prog_bar)
+        self.prog_bar.setMaximumHeight(4)
+        pl.addWidget(self.prog_bar)
 
         self.prog_lbl = QLabel("")
-        self.prog_lbl.setStyleSheet("color:#9ca3af; font-size:11px;")
+        self.prog_lbl.setStyleSheet("color: #787878; font-size: 10px;")
         self.prog_lbl.setVisible(False)
-        lay.addWidget(self.prog_lbl)
-
-        lay.addStretch()
+        pl.addWidget(self.prog_lbl)
 
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setVisible(False)
         self.btn_cancel.setStyleSheet(
-            "QPushButton{border:1px solid #ef4444;color:#ef4444;border-radius:4px;padding:5px;}"
-            "QPushButton:hover{background:#7f1d1d;color:white;}"
+            "QPushButton { border: 1px solid #ef4444; color: #ef4444; border-radius: 3px; padding: 4px; }"
+            "QPushButton:hover { background: #7f1d1d; color: white; }"
         )
         self.btn_cancel.clicked.connect(self.cancel_requested)
-        lay.addWidget(self.btn_cancel)
+        pl.addWidget(self.btn_cancel)
 
         self.btn_plot = QPushButton("▶  Plot All")
         self.btn_plot.setStyleSheet(
-            "QPushButton{background:#1e3a8a;color:#93c5fd;font-weight:bold;"
-            "border:1px solid #1e40af;border-radius:6px;padding:12px 0;}"
-            "QPushButton:hover{background:#1e40af;}"
-            "QPushButton:disabled{background:#111827;color:#4b5563;border-color:#374151;}"
+            "QPushButton { background: #2680eb; color: white; font-weight: bold;"
+            "  border: none; border-radius: 4px; padding: 10px 0; }"
+            "QPushButton:hover { background: #1473e6; }"
+            "QPushButton:disabled { background: #252525; color: #484848; border: 1px solid #2a2a2a; }"
         )
         self.btn_plot.clicked.connect(self.plot_requested)
-        lay.addWidget(self.btn_plot)
+        pl.addWidget(self.btn_plot)
+
+        root.addWidget(plot_w)
+
+    @staticmethod
+    def _section_hdr(text: str) -> QLabel:
+        lbl = QLabel(f"  {text}")
+        lbl.setFixedHeight(32)
+        lbl.setStyleSheet(
+            "font-size: 10px; font-weight: bold; color: #606060; letter-spacing: 1.5px;"
+            "background: #222; border-bottom: 1px solid #111;"
+        )
+        return lbl
+
+    @staticmethod
+    def _hsep() -> QFrame:
+        f = QFrame()
+        f.setFrameShape(QFrame.HLine)
+        f.setFixedHeight(1)
+        f.setStyleSheet("background: #111;")
+        return f
 
     def update_stats(self, canvas: "DrawCanvas"):
         s = canvas.stats()
         n, d = s["paths"], s["distance_mm"]
-        self.lbl_paths.setText(f"Paths\n{n:,}")
-        self.lbl_distance.setText(f"Distance\n{d / 1000:.2f} m")
+        self.lbl_paths.setText(   f"Paths     {n:,}")
+        self.lbl_distance.setText(f"Distance  {d/1000:.2f} m")
         if self._plotter and n > 0:
             feed   = self._plotter.settings.get("feed_draw", 1500)
             settle = self._plotter.settings.get("servo_settle_ms", 150) / 1000
             secs   = int(d / (feed / 60) + n * settle * 2)
-            m, s_  = divmod(secs, 60)
-            self.lbl_time.setText(f"Est. time\n{m}m {s_:02d}s")
+            m_, s_ = divmod(secs, 60)
+            self.lbl_time.setText(f"Est. time {m_}m {s_:02d}s")
         else:
-            self.lbl_time.setText("Est. time\n—")
+            self.lbl_time.setText("Est. time —")
 
 
 # ── drawing canvas ────────────────────────────────────────────────────────────
@@ -372,27 +339,24 @@ class DrawCanvas(QWidget):
     # ── public ────────────────────────────────────────────────────────────────
 
     def set_tool(self, t: str):
-        self.tool = t
-        self._cancel()
+        self.tool = t; self._cancel()
 
     def undo(self):
         if self._drawing and self.tool == "polyline" and len(self._pts) > 1:
             self._pts.pop()
         elif self._drawing:
-            self._cancel()
-            return
+            self._cancel(); return
         elif self.paths:
             self.paths.pop()
         self.update()
 
     def clear(self):
-        self.paths.clear()
-        self._cancel()
+        self.paths.clear(); self._cancel()
 
     def add_paths_mm(self, paths_mm: list, bed_mm: float = 220.0):
         for path in paths_mm:
             if len(path) >= 2:
-                self.paths.append([(x / bed_mm, 1.0 - y / bed_mm) for x, y in path])
+                self.paths.append([(x/bed_mm, 1.0 - y/bed_mm) for x, y in path])
         self.update()
 
     def add_paths_norm(self, paths: list):
@@ -402,59 +366,52 @@ class DrawCanvas(QWidget):
     def get_plotter_paths(self) -> list:
         bx = self._plotter.settings["x_max"] if self._plotter else 220.0
         by = self._plotter.settings["y_max"] if self._plotter else 220.0
-        return [[(nx * bx, (1 - ny) * by) for nx, ny in p]
-                for p in self.paths if len(p) >= 2]
+        return [[(nx*bx, (1-ny)*by) for nx, ny in p] for p in self.paths if len(p) >= 2]
 
     def to_json(self) -> dict:
         return {"version": 1, "paths": self.paths}
 
     def load_json(self, data: dict):
         self.paths = [list(map(tuple, p)) for p in data.get("paths", [])]
-        self._cancel()
-        self.update()
+        self._cancel(); self.update()
 
     def stats(self) -> dict:
         n = len(self.paths)
-        dist = sum(
-            math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1])
-            for p in self.paths for i in range(1, len(p))
-        )
+        d = sum(math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1])
+                for p in self.paths for i in range(1, len(p)))
         bed = self._plotter.settings["x_max"] if self._plotter else 220.0
-        return {"paths": n, "distance_mm": dist * bed}
+        return {"paths": n, "distance_mm": d * bed}
 
     # ── coords ────────────────────────────────────────────────────────────────
 
     def _paper_rect(self) -> QRectF:
-        return QRectF(PAD, PAD, self.width() - PAD*2, self.height() - PAD*2)
+        return QRectF(PAD, PAD, self.width()-PAD*2, self.height()-PAD*2)
 
     def _norm(self, qp) -> tuple:
         pr = self._paper_rect()
-        return (max(0.0, min(1.0, (qp.x() - pr.x()) / pr.width())),
-                max(0.0, min(1.0, (qp.y() - pr.y()) / pr.height())))
+        return (max(0., min(1., (qp.x()-pr.x())/pr.width())),
+                max(0., min(1., (qp.y()-pr.y())/pr.height())))
 
     def _px(self, nx: float, ny: float) -> tuple:
         pr = self._paper_rect()
-        return int(pr.x() + nx * pr.width()), int(pr.y() + ny * pr.height())
+        return int(pr.x()+nx*pr.width()), int(pr.y()+ny*pr.height())
 
     @staticmethod
     def _c45(o, t):
-        dx, dy = t[0]-o[0], t[1]-o[1]
-        d = math.hypot(dx, dy)
-        a = round(math.atan2(dy, dx) / (math.pi/4)) * (math.pi/4)
+        dx, dy = t[0]-o[0], t[1]-o[1]; d = math.hypot(dx, dy)
+        a = round(math.atan2(dy, dx)/(math.pi/4))*(math.pi/4)
         return o[0]+d*math.cos(a), o[1]+d*math.sin(a)
 
     @staticmethod
     def _csq(o, t):
-        dx, dy = t[0]-o[0], t[1]-o[1]
-        s = max(abs(dx), abs(dy))
+        dx, dy = t[0]-o[0], t[1]-o[1]; s = max(abs(dx), abs(dy))
         return o[0]+math.copysign(s, dx), o[1]+math.copysign(s, dy)
 
     def _cancel(self):
         self._drawing = False; self._pts = []; self._start = None; self.update()
 
     def _finish_polyline(self):
-        if len(self._pts) >= 2:
-            self.paths.append(list(self._pts))
+        if len(self._pts) >= 2: self.paths.append(list(self._pts))
         self._cancel()
 
     @staticmethod
@@ -464,68 +421,53 @@ class DrawCanvas(QWidget):
 
     @staticmethod
     def _ellipse_path(x0, y0, x1, y1, n=64):
-        cx, cy = (x0+x1)/2, (y0+y1)/2
-        rx, ry = abs(x1-x0)/2, abs(y1-y0)/2
-        if rx < 1e-6 or ry < 1e-6:
-            return []
+        cx, cy = (x0+x1)/2, (y0+y1)/2; rx, ry = abs(x1-x0)/2, abs(y1-y0)/2
+        if rx < 1e-6 or ry < 1e-6: return []
         return [(cx+rx*math.cos(2*math.pi*i/n), cy+ry*math.sin(2*math.pi*i/n))
                 for i in range(n+1)]
 
     # ── events ────────────────────────────────────────────────────────────────
 
-    def resizeEvent(self, _e):
-        super().resizeEvent(_e); self._bg = None
+    def resizeEvent(self, _e): super().resizeEvent(_e); self._bg = None
 
     def keyPressEvent(self, e):
         self._shift = bool(e.modifiers() & Qt.ShiftModifier)
         k = e.key()
-        if k == Qt.Key_Escape:
-            self._cancel()
-        elif k in (Qt.Key_Return, Qt.Key_Enter) and self.tool == "polyline":
-            self._finish_polyline()
-        elif e.modifiers() & Qt.ControlModifier and k == Qt.Key_Z:
-            self.undo()
+        if k == Qt.Key_Escape: self._cancel()
+        elif k in (Qt.Key_Return, Qt.Key_Enter) and self.tool == "polyline": self._finish_polyline()
+        elif e.modifiers() & Qt.ControlModifier and k == Qt.Key_Z: self.undo()
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e):
-        self._shift = bool(e.modifiers() & Qt.ShiftModifier)
-        self.update()
+        self._shift = bool(e.modifiers() & Qt.ShiftModifier); self.update()
         super().keyReleaseEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton: return
-        self.setFocus()
-        pos = self._norm(e.pos())
-        if self.tool == "pen":
-            self._drawing = True; self._pts = [pos]
+        self.setFocus(); pos = self._norm(e.pos())
+        if self.tool == "pen": self._drawing = True; self._pts = [pos]
         elif self.tool == "polyline":
-            if not self._drawing:
-                self._drawing = True; self._pts = [pos]
-            else:
-                self._pts.append(self._c45(self._pts[-1], pos) if self._shift else pos)
-        elif self.tool in ("rect", "ellipse"):
-            self._drawing = True; self._start = pos
+            if not self._drawing: self._drawing = True; self._pts = [pos]
+            else: self._pts.append(self._c45(self._pts[-1], pos) if self._shift else pos)
+        elif self.tool in ("rect","ellipse"): self._drawing = True; self._start = pos
 
     def mouseMoveEvent(self, e):
         self._shift = bool(e.modifiers() & Qt.ShiftModifier)
         self._mouse = self._norm(e.pos())
-        if self._drawing and self.tool == "pen":
-            self._pts.append(self._mouse)
+        if self._drawing and self.tool == "pen": self._pts.append(self._mouse)
         self.update()
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton: return
         pos = self._norm(e.pos())
         if self.tool == "pen" and self._drawing:
-            if len(self._pts) >= 2:
-                self.paths.append(list(self._pts))
+            if len(self._pts) >= 2: self.paths.append(list(self._pts))
             self._cancel()
-        elif self.tool in ("rect", "ellipse") and self._drawing:
+        elif self.tool in ("rect","ellipse") and self._drawing:
             end = self._csq(self._start, pos) if self._shift else pos
             path = (self._rect_path(*self._start, *end) if self.tool == "rect"
                     else self._ellipse_path(*self._start, *end))
-            if path:
-                self.paths.append(path)
+            if path: self.paths.append(path)
             self._drawing = False; self._start = None
 
     def mouseDoubleClickEvent(self, e):
@@ -535,31 +477,30 @@ class DrawCanvas(QWidget):
     # ── background ────────────────────────────────────────────────────────────
 
     def _get_bg(self) -> QPixmap:
-        if self._bg is None:
-            self._bg = self._render_bg()
+        if self._bg is None: self._bg = self._render_bg()
         return self._bg
 
     def _render_bg(self) -> QPixmap:
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0: return QPixmap(1, 1)
-        pix = QPixmap(w, h)
-        pix.fill(BG)
+        pix = QPixmap(w, h); pix.fill(BG)
         pr = self._paper_rect()
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        for i in range(10, 0, -1):
-            p.setBrush(QColor(0, 0, 0, int(90*(1-i/10))))
+        p = QPainter(pix); p.setRenderHint(QPainter.Antialiasing)
+        # Subtle shadow
+        for i in range(8, 0, -1):
+            p.setBrush(QColor(0, 0, 0, int(60*(1-i/8))))
             p.setPen(Qt.NoPen)
-            p.drawRoundedRect(QRectF(pr.x()+i*.5, pr.y()+i*.7, pr.width(), pr.height()), 4, 4)
+            p.drawRoundedRect(QRectF(pr.x()+i*.5, pr.y()+i*.6, pr.width(), pr.height()), 3, 3)
+        # Paper
         p.setBrush(PAPER); p.setPen(Qt.NoPen)
-        p.drawRoundedRect(pr, 4, 4)
+        p.drawRoundedRect(pr, 3, 3)
+        # Subtle dot grid
         p.setPen(Qt.NoPen); p.setBrush(QBrush(GRID))
-        sp, ox, oy = 28, int(pr.x()), int(pr.y())
+        sp, ox, oy = 24, int(pr.x()), int(pr.y())
         for gx in range(ox+sp, ox+int(pr.width()), sp):
             for gy in range(oy+sp, oy+int(pr.height()), sp):
                 p.drawEllipse(gx-1, gy-1, 2, 2)
-        p.end()
-        return pix
+        p.end(); return pix
 
     # ── paint ─────────────────────────────────────────────────────────────────
 
@@ -570,50 +511,43 @@ class DrawCanvas(QWidget):
         painter.drawPixmap(0, 0, self._get_bg())
 
         clip = QPainterPath()
-        clip.addRoundedRect(pr, 4, 4)
+        clip.addRoundedRect(pr, 3, 3)
         painter.setClipPath(clip)
 
-        painter.setPen(QPen(INK, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setPen(QPen(INK, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
-        for path in self.paths:
-            self._draw_pts(painter, path)
+        for path in self.paths: self._draw_pts(painter, path)
 
         if self._drawing:
-            painter.setPen(QPen(LIVE, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setPen(QPen(LIVE, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             m = self._mouse
-            if self.tool in ("pen", "polyline") and self._pts:
+            if self.tool in ("pen","polyline") and self._pts:
                 self._draw_pts(painter, self._pts)
                 if self.tool == "polyline" and m:
                     end = self._c45(self._pts[-1], m) if self._shift else m
-                    painter.setPen(QPen(LIVE, 1.5, Qt.DashLine))
-                    x1, y1 = self._px(*self._pts[-1])
-                    x2, y2 = self._px(*end)
+                    painter.setPen(QPen(LIVE, 1, Qt.DashLine))
+                    x1, y1 = self._px(*self._pts[-1]); x2, y2 = self._px(*end)
                     painter.drawLine(x1, y1, x2, y2)
-                    painter.setBrush(QBrush(LIVE))
-                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(LIVE)); painter.setPen(Qt.NoPen)
                     for pt in self._pts:
-                        px_, py_ = self._px(*pt)
-                        painter.drawEllipse(px_-4, py_-4, 8, 8)
-            elif self.tool in ("rect", "ellipse") and self._start and m:
+                        px_, py_ = self._px(*pt); painter.drawEllipse(px_-3, py_-3, 6, 6)
+            elif self.tool in ("rect","ellipse") and self._start and m:
                 end = self._csq(self._start, m) if self._shift else m
-                painter.setPen(QPen(LIVE, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                painter.setPen(QPen(LIVE, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
                 painter.setBrush(Qt.NoBrush)
                 path = (self._rect_path(*self._start, *end) if self.tool == "rect"
                         else self._ellipse_path(*self._start, *end, n=64))
-                if path:
-                    self._draw_pts(painter, path)
+                if path: self._draw_pts(painter, path)
 
         painter.setClipping(False)
         if self._mouse:
             mx, my = self._px(*self._mouse)
-            painter.setBrush(QBrush(LIVE))
-            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(LIVE)); painter.setPen(Qt.NoPen)
             painter.drawEllipse(mx-3, my-3, 6, 6)
 
-    def _draw_pts(self, painter: QPainter, pts: list):
+    def _draw_pts(self, painter, pts):
         for i in range(1, len(pts)):
-            x1, y1 = self._px(*pts[i-1])
-            x2, y2 = self._px(*pts[i])
+            x1, y1 = self._px(*pts[i-1]); x2, y2 = self._px(*pts[i])
             painter.drawLine(x1, y1, x2, y2)
 
 
@@ -628,13 +562,12 @@ class DrawPanel(QWidget):
         self._plotter    = plotter
         self._plot_cancel = threading.Event()
 
-        self._canvas   = DrawCanvas(plotter)
-        self._tools    = ToolColumn(self._canvas.undo, self._canvas.clear)
-        self._patterns = PatternsPanel()
-        self._right    = RightPanel(plotter)
+        self._canvas = DrawCanvas(plotter)
+        self._tools  = ToolColumn()
+        self._right  = RightPanel(plotter)
 
         self._tools.tool_changed.connect(self._canvas.set_tool)
-        self._patterns.pattern_selected.connect(self._add_pattern)
+        self._right.pattern_selected.connect(self._add_pattern)
         self._right.plot_requested.connect(self._start_plot)
         self._right.cancel_requested.connect(lambda: self._plot_cancel.set())
 
@@ -642,12 +575,12 @@ class DrawPanel(QWidget):
         self._plot_done.connect(self._on_plot_done)
 
         self._build_ui()
+
         QShortcut(QKeySequence("Ctrl+Z"), self, self._canvas.undo)
         QShortcut(QKeySequence("Ctrl+S"), self, self._save)
         QShortcut(QKeySequence("Ctrl+O"), self, self._load)
 
-        t = QTimer(self)
-        t.setInterval(1000)
+        t = QTimer(self); t.setInterval(1000)
         t.timeout.connect(lambda: self._right.update_stats(self._canvas))
         t.start()
 
@@ -655,43 +588,39 @@ class DrawPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
         root.addWidget(self._build_toolbar())
 
         body = QWidget()
-        blay = QHBoxLayout(body)
-        blay.setContentsMargins(0, 0, 0, 0)
-        blay.setSpacing(0)
-        blay.addWidget(self._tools)
-        blay.addWidget(self._patterns)
-        blay.addWidget(self._canvas, stretch=1)
-        blay.addWidget(self._right)
+        bl = QHBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(0)
+        bl.addWidget(self._tools)
+        bl.addWidget(self._canvas, stretch=1)
+        bl.addWidget(self._right)
         root.addWidget(body, stretch=1)
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet("background:#1e1e1e; border-bottom:1px solid #2d2d2d;")
+        bar.setFixedHeight(40)
+        bar.setStyleSheet("background: #2c2c2c; border-bottom: 1px solid #111;")
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(12, 0, 12, 0)
-        lay.setSpacing(6)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(4)
 
-        def btn(label: str, tip: str = "") -> QPushButton:
-            b = QPushButton(label)
+        def btn(txt: str, tip: str = "") -> QPushButton:
+            b = QPushButton(txt)
             if tip: b.setToolTip(tip)
-            b.setStyleSheet(
-                "QPushButton{border:1px solid #444;border-radius:4px;padding:4px 10px;}"
-                "QPushButton:hover{background:#2d2d2d;}"
-            )
             return b
 
+        b_undo  = btn("Undo",  "Ctrl+Z"); b_undo.clicked.connect(self._canvas.undo)
+        b_clear = btn("Clear");           b_clear.clicked.connect(self._canvas.clear)
+        lay.addWidget(b_undo); lay.addWidget(b_clear)
+
+        lay.addWidget(self._vsep())
         lay.addWidget(QLabel("Paper:"))
+
         self._paper_combo = QComboBox()
-        self._paper_combo.setFixedWidth(138)
-        self._paper_combo.setStyleSheet(
-            "background:#262626;border:1px solid #404040;"
-            "border-radius:4px;padding:3px 6px;color:#fff;"
-        )
+        self._paper_combo.setFixedWidth(132)
         for name, *_ in PAPER_PRESETS:
             self._paper_combo.addItem(name)
         self._paper_combo.currentIndexChanged.connect(self._apply_paper)
@@ -699,41 +628,34 @@ class DrawPanel(QWidget):
 
         lay.addWidget(self._vsep())
 
-        for label, fn, tip in [
-            ("Save",       self._save,       "Ctrl+S"),
-            ("Load",       self._load,       "Ctrl+O"),
-            ("Import SVG", self._import_svg, "Import an SVG file"),
+        for txt, fn, tip in [
+            ("Save",   self._save,       "Ctrl+S"),
+            ("Load",   self._load,       "Ctrl+O"),
+            ("SVG…",   self._import_svg, "Import SVG file"),
         ]:
-            b = btn(label, tip)
-            b.clicked.connect(fn)
-            lay.addWidget(b)
+            b = btn(txt, tip); b.clicked.connect(fn); lay.addWidget(b)
 
         lay.addStretch()
-
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet("color:#52525b; font-size:11px;")
+        self._status_lbl.setStyleSheet("color: #555; font-size: 11px;")
         lay.addWidget(self._status_lbl)
-
         return bar
 
     @staticmethod
     def _vsep() -> QWidget:
-        f = QWidget()
-        f.setFixedSize(1, 22)
-        f.setStyleSheet("background:#333;")
+        f = QWidget(); f.setFixedSize(1, 20)
+        f.setStyleSheet("background: #333;")
         return f
 
     # ── paper ─────────────────────────────────────────────────────────────────
 
     def _apply_paper(self, idx: int):
-        if not self._plotter or idx < 0 or idx >= len(PAPER_PRESETS):
-            return
+        if not self._plotter or idx < 0 or idx >= len(PAPER_PRESETS): return
         _, xmax, ymax = PAPER_PRESETS[idx]
         self._plotter.settings["x_max"] = xmax
         self._plotter.settings["y_max"] = ymax
-        self._canvas._bg = None
-        self._canvas.update()
-        self._set_status(f"Paper: {PAPER_PRESETS[idx][0]}")
+        self._canvas._bg = None; self._canvas.update()
+        self._set_status(PAPER_PRESETS[idx][0])
 
     # ── patterns ──────────────────────────────────────────────────────────────
 
@@ -742,30 +664,27 @@ class DrawPanel(QWidget):
             name, _, _, gen = PRESETS[row]
             self._canvas.add_paths_mm(gen(), bed_mm=220.0)
             self._set_status(f"Added {name}")
-            self._patterns._list.clearSelection()
+            self._right._patt_list.clearSelection()
 
     # ── file I/O ──────────────────────────────────────────────────────────────
 
     def _save(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Drawing", "", "Plot files (*.plot);;JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save", "", "Plot (*.plot);;JSON (*.json)")
         if path:
             Path(path).write_text(json.dumps(self._canvas.to_json(), indent=2))
-            self._set_status(f"Saved → {Path(path).name}")
+            self._set_status(f"Saved  {Path(path).name}")
 
     def _load(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Drawing", "", "Plot files (*.plot);;JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "Load", "", "Plot (*.plot);;JSON (*.json)")
         if path:
             try:
                 self._canvas.load_json(json.loads(Path(path).read_text()))
-                self._set_status(f"Loaded {Path(path).name}")
+                self._set_status(f"Loaded  {Path(path).name}")
             except Exception as exc:
-                self._set_status(f"Load failed: {exc}")
+                self._set_status(f"Error: {exc}")
 
     def _import_svg(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import SVG", "", "SVG files (*.svg)")
+        path, _ = QFileDialog.getOpenFileName(self, "Import SVG", "", "SVG (*.svg)")
         if path:
             try:
                 paths = parse_svg(path)
@@ -773,20 +692,17 @@ class DrawPanel(QWidget):
                     self._canvas.add_paths_norm(paths)
                     self._set_status(f"Imported {len(paths)} paths")
                 else:
-                    self._set_status("No paths found in SVG")
+                    self._set_status("No paths in SVG")
             except Exception as exc:
-                self._set_status(f"SVG import failed: {exc}")
+                self._set_status(f"SVG error: {exc}")
 
     # ── plot ──────────────────────────────────────────────────────────────────
 
     def _start_plot(self):
         if not self._plotter or not self._plotter.connected:
-            self._set_status("Connect the plotter first")
-            return
+            self._set_status("Plotter not connected"); return
         paths = self._canvas.get_plotter_paths()
-        if not paths:
-            self._set_status("Nothing to plot")
-            return
+        if not paths: self._set_status("Nothing to plot"); return
         self._plot_cancel.clear()
         self._right.btn_plot.setEnabled(False)
         self._right.btn_cancel.setVisible(True)
@@ -797,39 +713,29 @@ class DrawPanel(QWidget):
         threading.Thread(target=self._run_plot, args=(paths,), daemon=True).start()
 
     def _run_plot(self, paths: list):
-        total = len(paths)
         for i, path in enumerate(paths):
             if self._plot_cancel.is_set():
-                self._plotter.pen_up()
-                self._plot_done.emit(False)
-                return
-            if len(path) < 2:
-                continue
-            self._plotter.pen_up()
-            self._plotter.move_to(path[0][0], path[0][1])
+                self._plotter.pen_up(); self._plot_done.emit(False); return
+            if len(path) < 2: continue
+            self._plotter.pen_up(); self._plotter.move_to(path[0][0], path[0][1])
             self._plotter.pen_down()
             for x, y in path[1:]:
                 if self._plot_cancel.is_set():
-                    self._plotter.pen_up()
-                    self._plot_done.emit(False)
-                    return
+                    self._plotter.pen_up(); self._plot_done.emit(False); return
                 self._plotter.move_to(x, y, self._plotter.settings.get("feed_draw", 1500))
-            self._plot_progress.emit(i + 1, total)
-        self._plotter.pen_up()
-        self._plot_done.emit(True)
+            self._plot_progress.emit(i+1, len(paths))
+        self._plotter.pen_up(); self._plot_done.emit(True)
 
-    def _on_plot_progress(self, current: int, total: int):
-        self._right.prog_bar.setValue(current)
-        self._right.prog_lbl.setText(f"Stroke {current} / {total}")
+    def _on_plot_progress(self, cur: int, tot: int):
+        self._right.prog_bar.setValue(cur)
+        self._right.prog_lbl.setText(f"Stroke {cur} / {tot}")
 
-    def _on_plot_done(self, success: bool):
+    def _on_plot_done(self, ok: bool):
         self._right.prog_bar.setVisible(False)
         self._right.prog_lbl.setVisible(False)
         self._right.btn_cancel.setVisible(False)
         self._right.btn_plot.setEnabled(True)
-        self._set_status("Plot complete ✓" if success else "Plot cancelled")
-
-    # ── Track → Draw ──────────────────────────────────────────────────────────
+        self._set_status("Complete ✓" if ok else "Cancelled")
 
     def receive_strokes(self, strokes: list):
         self._canvas.add_paths_norm(strokes)
