@@ -40,6 +40,7 @@ class PlotterApp(QMainWindow):
         self._root_layout.addWidget(self._build_body(), stretch=1)
 
         self.cv_controller_panel.strokes_sent.connect(self.draw_panel.receive_strokes)
+        self.draw_panel.plot_navigate.connect(self._on_plot_navigate)
 
     def _build_topbar(self) -> QFrame:
         bar = QFrame()
@@ -48,14 +49,16 @@ class PlotterApp(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(4)
-        nav_group = QButtonGroup(self)
+        self._nav_group = QButtonGroup(self)
+        self._nav_btns: list[QPushButton] = []
         for i, (text, idx) in enumerate([("Draw",0),("AI",1),("Plotter",2),("Track",3)]):
             btn = QPushButton(text)
             btn.setObjectName("BtnTopNav")
             btn.setCheckable(True)
             btn.setChecked(i == 0)
             btn.clicked.connect(lambda _, ix=idx: self.stack.setCurrentIndex(ix))
-            nav_group.addButton(btn)
+            self._nav_group.addButton(btn)
+            self._nav_btns.append(btn)
             lay.addWidget(btn)
         lay.addStretch()
         self._btn_estop = QPushButton("⏹  E-STOP")
@@ -120,6 +123,16 @@ class PlotterApp(QMainWindow):
             "border-radius:5px;padding:0 18px;font-weight:bold;font-size:13px;}"
             "QPushButton:hover{background:#991b1b;}"
         )
+
+    def _switch_tab(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+        for i, btn in enumerate(self._nav_btns):
+            btn.setChecked(i == idx)
+
+    def _on_plot_navigate(self, paths: list):
+        """Draw tab 'Plot' button — switch to Plotter tab and start plotting."""
+        self._switch_tab(2)  # Plotter tab
+        self.plotter_panel.start_plot_preview(paths)
 
     def keyPressEvent(self, event):
         if event.isAutoRepeat(): return

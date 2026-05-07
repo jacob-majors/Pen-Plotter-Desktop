@@ -17,6 +17,7 @@ from PySide6.QtGui import (
 )
 
 from core.vision import detect_and_warp, trace_to_paths, draw_trace_preview, VisionScanner
+from core.handwriting import text_to_paths as text_to_handwriting
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent.parent / "config.json"
 BG = QColor("#18181b")
@@ -149,20 +150,13 @@ class AIPanel(QWidget):
         self._btn_capture.clicked.connect(self._capture)
         tlay.addWidget(self._btn_capture)
 
-        self._btn_scan = QPushButton("Grid Scan")
-        self._btn_scan.setStyleSheet(
-            "QPushButton{border:1px solid #444;border-radius:4px;padding:5px 12px;}"
-            "QPushButton:hover{background:#2d2d2d;}"
+        self._btn_smart = QPushButton("✨ Smart Scan & Solve")
+        self._btn_smart.setStyleSheet(
+            "QPushButton{background:#4338ca;color:white;border-radius:4px;padding:6px 14px;font-weight:bold;}"
+            "QPushButton:hover{background:#4f46e5;}"
         )
-        self._btn_scan.clicked.connect(self._start_scan)
-        tlay.addWidget(self._btn_scan)
-
-        self._progress = QProgressBar()
-        self._progress.setVisible(False)
-        self._progress.setFixedWidth(160)
-        self._progress.setFixedHeight(16)
-        self._progress.setFormat("%v / %m cells")
-        tlay.addWidget(self._progress)
+        self._btn_smart.clicked.connect(self._start_smart_workflow)
+        tlay.addWidget(self._btn_smart)
 
         tlay.addStretch()
 
@@ -334,13 +328,19 @@ class AIPanel(QWidget):
 
         hdr("GEMINI API")
 
-        lay.addWidget(QLabel("API Key:"))
         self._api_key = QLineEdit()
         self._api_key.setEchoMode(QLineEdit.Password)
-        self._api_key.setPlaceholderText("AIza…")
+        self._api_key.setPlaceholderText("Paste Gemini API Key here...")
         self._api_key.setText(self._load_api_key())
-        self._api_key.editingFinished.connect(self._save_api_key)
-        lay.addWidget(self._api_key)
+        
+        btn_save_key = QPushButton("Save Key")
+        btn_save_key.setStyleSheet("background: #334155; padding: 4px; font-size: 11px;")
+        btn_save_key.clicked.connect(self._save_api_key)
+        
+        key_lay = QHBoxLayout()
+        key_lay.addWidget(self._api_key)
+        key_lay.addWidget(btn_save_key)
+        lay.addLayout(key_lay)
 
         lay.addWidget(QLabel("Prompt:"))
         self._prompt = QTextEdit()
@@ -375,13 +375,9 @@ class AIPanel(QWidget):
         )
         lay.addWidget(self._response_box, stretch=1)
 
-        self._btn_plot_response = QPushButton("Plot G-code from Response")
+        self._btn_plot_response = QPushButton("Plot Solution Paths")
         self._btn_plot_response.setEnabled(False)
-        self._btn_plot_response.setStyleSheet(
-            "QPushButton{background:#1e3a8a;color:#93c5fd;font-weight:bold;"
-            "border:1px solid #1e40af;border-radius:4px;padding:8px;}"
-            "QPushButton:disabled{color:#4b5563;border-color:#374151;background:#111827;}"
-        )
+        self._btn_plot_response.setObjectName("btnPrimary")
         self._btn_plot_response.clicked.connect(self._plot_response_paths)
         lay.addWidget(self._btn_plot_response)
 
@@ -440,6 +436,74 @@ class AIPanel(QWidget):
         self._tab_group.button(1).setChecked(True)
         self._img_display.set_frame(frame, "Captured")
         self._set_status("Captured — click Detect & Warp or Trace Edges")
+
+    # ── smart workflow ────────────────────────────────────────────────────────
+    
+    def _start_smart_workflow(self):
+        if not self._cap or not self._cap.isOpened():
+            self._set_status("No camera — connect first")
+            return
+        if not self.plotter.connected:
+            self._set_status("Plotter not connected")
+            return
+        key = self._api_key.text().strip()
+        if not key:
+            self._set_status("Enter Gemini API key first")
+            return
+            
+        self._btn_smart.setEnabled(False)
+        self._status_lbl.setText("Starting Smart Scan...")
+        threading.Thread(target=self._run_smart_workflow, daemon=True).start()
+
+    def _run_smart_workflow(self):
+        try:
+            # 1. Grid Scan
+            rows, cols = self._spin_rows.value(), self._spin_cols.value()
+            wait = self._spin_wait.value()
+            self._status_sig.emit("Scanning bed...")
+            images, grid_size = self._scanner.start_grid_scan(
+                self._cap, grid_size=(rows, cols), wait_time=wait,
+                status_cb=lambda msg: self._status_sig.emit(msg)
+            )
+            
+            # 2. Stitch
+            self._status_sig.emit("Stitching images...")
+            stitched = self._scanner.stitch_scan(images, grid_size=grid_size)
+            if stitched is None:
+                self._status_sig.emit("Stitching failed")
+                self._btn_smart.setEnabled(True)
+                return
+            self._captured = stitched
+            self._frame_sig.emit((stitched, "Stitched Worksheet"))
+            
+            # 3. Gemini Analysis
+            self._status_sig.emit("Analyzing with Gemini...")
+            key = self._api_key.text().strip()
+            prompt = (
+                "This is a high-resolution scan of a worksheet on a plotter bed. "
+                "Extract all questions and provide short answers. "
+                "Return the result ONLY as a JSON array of objects: "
+                "[{\"text\": \"Answer text\", \"x_mm\": 100, \"y_mm\": 50}]. "
+                "The coordinates (x_mm, y_mm) should be estimates in millimeters on a 220x220mm bed. "
+                "Place answers near the original questions."
+            )
+            
+            import google.generativeai as genai
+            from PIL import Image as PILImage
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            rgb = cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB)
+            pil_img = PILImage.fromarray(rgb)
+            response = model.generate_content([prompt, pil_img])
+            
+            # 4. Process Response
+            self._gemini_sig.emit(response.text)
+            self._status_sig.emit("Processing solution paths...")
+            
+        except Exception as e:
+            self._status_sig.emit(f"Workflow error: {e}")
+        finally:
+            self._btn_smart.setEnabled(True)
 
     # ── grid scan ─────────────────────────────────────────────────────────────
 
@@ -581,13 +645,32 @@ class AIPanel(QWidget):
         self._response_box.setPlainText(text)
         self._btn_analyze.setEnabled(True)
         self._set_status("Gemini response received")
-        # Enable plot button if response contains a JSON array (coordinate paths)
+        
+        # Clean up text if Gemini wrapped it in markdown code blocks
+        clean_json = text.strip()
+        if clean_json.startswith("```json"):
+            clean_json = clean_json[7:]
+        if clean_json.endswith("```"):
+            clean_json = clean_json[:-3]
+        clean_json = clean_json.strip()
+
         try:
-            data = json.loads(text)
+            data = json.loads(clean_json)
             if isinstance(data, list):
-                self._gemini_paths = data
-                self._btn_plot_response.setEnabled(self.plotter.connected)
-        except Exception:
+                self._gemini_paths = []
+                for item in data:
+                    txt = item.get("text", "")
+                    tx = float(item.get("x_mm", 110))
+                    ty = float(item.get("y_mm", 110))
+                    # Convert text to handwriting paths
+                    h_paths = text_to_handwriting(txt, tx, ty, size=6.0)
+                    self._gemini_paths.extend(h_paths)
+                
+                if self._gemini_paths:
+                    self._btn_plot_response.setEnabled(self.plotter.connected)
+                    self._set_status(f"Generated {len(data)} answers as handwriting paths")
+        except Exception as e:
+            print(f"JSON Parse Error: {e}")
             self._gemini_paths = []
 
     def _plot_response_paths(self):

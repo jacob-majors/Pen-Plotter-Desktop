@@ -9,14 +9,13 @@ Toolbar: Undo · Clear · Paper size · Save · Load · Import SVG
 from __future__ import annotations
 import json
 import math
-import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QComboBox, QButtonGroup,
-    QAbstractItemView,
+    QAbstractItemView, QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import (
@@ -250,34 +249,15 @@ class RightPanel(QWidget):
         plot_w.setStyleSheet("background: transparent;")
         pl = QVBoxLayout(plot_w)
         pl.setContentsMargins(10, 8, 10, 12)
-        pl.setSpacing(6)
 
-        self.prog_bar = QProgressBar()
-        self.prog_bar.setVisible(False)
-        self.prog_bar.setMaximumHeight(4)
-        pl.addWidget(self.prog_bar)
-
-        self.prog_lbl = QLabel("")
-        self.prog_lbl.setStyleSheet("color: #787878; font-size: 10px;")
-        self.prog_lbl.setVisible(False)
-        pl.addWidget(self.prog_lbl)
-
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setVisible(False)
-        self.btn_cancel.setStyleSheet(
-            "QPushButton { border: 1px solid #ef4444; color: #ef4444; border-radius: 3px; padding: 4px; }"
-            "QPushButton:hover { background: #7f1d1d; color: white; }"
-        )
-        self.btn_cancel.clicked.connect(self.cancel_requested)
-        pl.addWidget(self.btn_cancel)
-
-        self.btn_plot = QPushButton("▶  Plot All")
+        self.btn_plot = QPushButton("▶  Plot")
         self.btn_plot.setStyleSheet(
             "QPushButton { background: #2680eb; color: white; font-weight: bold;"
-            "  border: none; border-radius: 4px; padding: 10px 0; }"
+            "  border: none; border-radius: 4px; padding: 11px 0; }"
             "QPushButton:hover { background: #1473e6; }"
             "QPushButton:disabled { background: #252525; color: #484848; border: 1px solid #2a2a2a; }"
         )
+        self.btn_plot.setToolTip("Switch to Plotter tab and start plotting with preview")
         self.btn_plot.clicked.connect(self.plot_requested)
         pl.addWidget(self.btn_plot)
 
@@ -364,9 +344,16 @@ class DrawCanvas(QWidget):
         self.update()
 
     def get_plotter_paths(self) -> list:
-        bx = self._plotter.settings["x_max"] if self._plotter else 220.0
-        by = self._plotter.settings["y_max"] if self._plotter else 220.0
-        return [[(nx*bx, (1-ny)*by) for nx, ny in p] for p in self.paths if len(p) >= 2]
+        if self._plotter:
+            s = self._plotter.settings
+            bx = s.get("_paper_x", s["x_max"] - s.get("x_min", 0))
+            by = s.get("_paper_y", s["y_max"] - s.get("y_min", 0))
+            ox = s.get("x_min", 0)
+            oy = s.get("y_min", 0)
+        else:
+            bx, by, ox, oy = 220.0, 220.0, 0.0, 0.0
+        return [[(ox + nx*bx, oy + (1-ny)*by) for nx, ny in p]
+                for p in self.paths if len(p) >= 2]
 
     def to_json(self) -> dict:
         return {"version": 1, "paths": self.paths}
@@ -406,6 +393,39 @@ class DrawCanvas(QWidget):
     def _csq(o, t):
         dx, dy = t[0]-o[0], t[1]-o[1]; s = max(abs(dx), abs(dy))
         return o[0]+math.copysign(s, dx), o[1]+math.copysign(s, dy)
+
+    # ── transform ─────────────────────────────────────────────────────────────
+
+    def scale_by(self, factor: float):
+        """Scale all paths around their collective centroid."""
+        if not self.paths or factor <= 0:
+            return
+        all_pts = [p for path in self.paths for p in path]
+        cx = sum(p[0] for p in all_pts) / len(all_pts)
+        cy = sum(p[1] for p in all_pts) / len(all_pts)
+        self.paths = [[(cx + (p[0]-cx)*factor, cy + (p[1]-cy)*factor)
+                       for p in path]
+                      for path in self.paths]
+        self.update()
+
+    def fit_to_paper(self, margin: float = 0.05):
+        """Scale and centre all paths to fill the paper with a margin."""
+        if not self.paths:
+            return
+        all_pts = [p for path in self.paths for p in path]
+        min_x = min(p[0] for p in all_pts); max_x = max(p[0] for p in all_pts)
+        min_y = min(p[1] for p in all_pts); max_y = max(p[1] for p in all_pts)
+        span_x = max_x - min_x or 1
+        span_y = max_y - min_y or 1
+        factor = min((1 - 2*margin) / span_x, (1 - 2*margin) / span_y)
+        new_w = span_x * factor
+        new_h = span_y * factor
+        ox = margin + (1 - 2*margin - new_w) / 2
+        oy = margin + (1 - 2*margin - new_h) / 2
+        self.paths = [[(ox + (p[0]-min_x)*factor, oy + (p[1]-min_y)*factor)
+                       for p in path]
+                      for path in self.paths]
+        self.update()
 
     def _cancel(self):
         self._drawing = False; self._pts = []; self._start = None; self.update()
@@ -554,13 +574,12 @@ class DrawCanvas(QWidget):
 # ── main panel ────────────────────────────────────────────────────────────────
 
 class DrawPanel(QWidget):
-    _plot_progress = Signal(int, int)
-    _plot_done     = Signal(bool)
+    # Emitted when the user clicks Plot — app switches to Plotter tab
+    plot_navigate = Signal(list)   # carries the mm-coord paths
 
     def __init__(self, plotter=None):
         super().__init__()
-        self._plotter    = plotter
-        self._plot_cancel = threading.Event()
+        self._plotter = plotter
 
         self._canvas = DrawCanvas(plotter)
         self._tools  = ToolColumn()
@@ -569,10 +588,6 @@ class DrawPanel(QWidget):
         self._tools.tool_changed.connect(self._canvas.set_tool)
         self._right.pattern_selected.connect(self._add_pattern)
         self._right.plot_requested.connect(self._start_plot)
-        self._right.cancel_requested.connect(lambda: self._plot_cancel.set())
-
-        self._plot_progress.connect(self._on_plot_progress)
-        self._plot_done.connect(self._on_plot_done)
 
         self._build_ui()
 
@@ -614,17 +629,43 @@ class DrawPanel(QWidget):
 
         b_undo  = btn("Undo",  "Ctrl+Z"); b_undo.clicked.connect(self._canvas.undo)
         b_clear = btn("Clear");           b_clear.clicked.connect(self._canvas.clear)
-        lay.addWidget(b_undo); lay.addWidget(b_clear)
+        lay.addWidget(b_undo)
+        lay.addWidget(b_clear)
 
         lay.addWidget(self._vsep())
-        lay.addWidget(QLabel("Paper:"))
 
+        # Paper size — includes "From Soft Limits" as first item
+        lay.addWidget(QLabel("Paper:"))
         self._paper_combo = QComboBox()
-        self._paper_combo.setFixedWidth(132)
+        self._paper_combo.setFixedWidth(148)
+        self._paper_combo.addItem("From Soft Limits")   # index 0 — dynamic
         for name, *_ in PAPER_PRESETS:
             self._paper_combo.addItem(name)
         self._paper_combo.currentIndexChanged.connect(self._apply_paper)
         lay.addWidget(self._paper_combo)
+
+        lay.addWidget(self._vsep())
+
+        # Scale controls
+        lay.addWidget(QLabel("Scale:"))
+        self._scale_spin = QDoubleSpinBox()
+        self._scale_spin.setRange(0.05, 10.0)
+        self._scale_spin.setValue(1.0)
+        self._scale_spin.setSingleStep(0.25)
+        self._scale_spin.setSuffix(" ×")
+        self._scale_spin.setFixedWidth(72)
+        self._scale_spin.setToolTip("Scale factor (1.0 = no change)")
+        lay.addWidget(self._scale_spin)
+
+        btn_scale = btn("Scale", "Scale drawing by the factor above")
+        btn_scale.clicked.connect(
+            lambda: self._canvas.scale_by(self._scale_spin.value())
+        )
+        lay.addWidget(btn_scale)
+
+        btn_fit = btn("Fit", "Scale and centre to fill the paper")
+        btn_fit.clicked.connect(self._canvas.fit_to_paper)
+        lay.addWidget(btn_fit)
 
         lay.addWidget(self._vsep())
 
@@ -636,9 +677,26 @@ class DrawPanel(QWidget):
             b = btn(txt, tip); b.clicked.connect(fn); lay.addWidget(b)
 
         lay.addStretch()
+
         self._status_lbl = QLabel("Ready")
         self._status_lbl.setStyleSheet("color: #555; font-size: 11px;")
         lay.addWidget(self._status_lbl)
+
+        lay.addWidget(self._vsep())
+
+        # Plot button — always visible, prominent, far right
+        btn_plot_tb = QPushButton("▶  Plot")
+        btn_plot_tb.setFixedHeight(30)
+        btn_plot_tb.setMinimumWidth(80)
+        btn_plot_tb.setToolTip("Switch to Plotter tab and start plotting with preview")
+        btn_plot_tb.setStyleSheet(
+            "QPushButton{background:#2680eb;color:white;font-weight:bold;"
+            "border:none;border-radius:3px;padding:0 16px;}"
+            "QPushButton:hover{background:#1473e6;}"
+        )
+        btn_plot_tb.clicked.connect(self._start_plot)
+        lay.addWidget(btn_plot_tb)
+
         return bar
 
     @staticmethod
@@ -650,12 +708,29 @@ class DrawPanel(QWidget):
     # ── paper ─────────────────────────────────────────────────────────────────
 
     def _apply_paper(self, idx: int):
-        if not self._plotter or idx < 0 or idx >= len(PAPER_PRESETS): return
-        _, xmax, ymax = PAPER_PRESETS[idx]
-        self._plotter.settings["x_max"] = xmax
-        self._plotter.settings["y_max"] = ymax
-        self._canvas._bg = None; self._canvas.update()
-        self._set_status(PAPER_PRESETS[idx][0])
+        if not self._plotter:
+            return
+        if idx == 0:
+            # "From Soft Limits" — use the range defined by x_min/x_max/y_min/y_max
+            s = self._plotter.settings
+            span_x = s["x_max"] - s["x_min"]
+            span_y = s["y_max"] - s["y_min"]
+            # Store the effective paper span so get_plotter_paths can use it
+            s["_paper_x"] = span_x
+            s["_paper_y"] = span_y
+            label = (f"Soft limits  {abs(span_x):.0f} × {abs(span_y):.0f} mm")
+            self._canvas._bg = None; self._canvas.update()
+            self._set_status(label)
+        else:
+            preset_idx = idx - 1          # offset for the extra "From Soft Limits" item
+            if preset_idx >= len(PAPER_PRESETS):
+                return
+            _, xmax, ymax = PAPER_PRESETS[preset_idx]
+            s = self._plotter.settings
+            s["x_max"] = xmax; s["y_max"] = ymax
+            s.pop("_paper_x", None); s.pop("_paper_y", None)  # clear override
+            self._canvas._bg = None; self._canvas.update()
+            self._set_status(PAPER_PRESETS[preset_idx][0])
 
     # ── patterns ──────────────────────────────────────────────────────────────
 
@@ -699,43 +774,12 @@ class DrawPanel(QWidget):
     # ── plot ──────────────────────────────────────────────────────────────────
 
     def _start_plot(self):
-        if not self._plotter or not self._plotter.connected:
-            self._set_status("Plotter not connected"); return
         paths = self._canvas.get_plotter_paths()
-        if not paths: self._set_status("Nothing to plot"); return
-        self._plot_cancel.clear()
-        self._right.btn_plot.setEnabled(False)
-        self._right.btn_cancel.setVisible(True)
-        self._right.prog_bar.setRange(0, len(paths))
-        self._right.prog_bar.setValue(0)
-        self._right.prog_bar.setVisible(True)
-        self._right.prog_lbl.setVisible(True)
-        threading.Thread(target=self._run_plot, args=(paths,), daemon=True).start()
-
-    def _run_plot(self, paths: list):
-        for i, path in enumerate(paths):
-            if self._plot_cancel.is_set():
-                self._plotter.pen_up(); self._plot_done.emit(False); return
-            if len(path) < 2: continue
-            self._plotter.pen_up(); self._plotter.move_to(path[0][0], path[0][1])
-            self._plotter.pen_down()
-            for x, y in path[1:]:
-                if self._plot_cancel.is_set():
-                    self._plotter.pen_up(); self._plot_done.emit(False); return
-                self._plotter.move_to(x, y, self._plotter.settings.get("feed_draw", 1500))
-            self._plot_progress.emit(i+1, len(paths))
-        self._plotter.pen_up(); self._plot_done.emit(True)
-
-    def _on_plot_progress(self, cur: int, tot: int):
-        self._right.prog_bar.setValue(cur)
-        self._right.prog_lbl.setText(f"Stroke {cur} / {tot}")
-
-    def _on_plot_done(self, ok: bool):
-        self._right.prog_bar.setVisible(False)
-        self._right.prog_lbl.setVisible(False)
-        self._right.btn_cancel.setVisible(False)
-        self._right.btn_plot.setEnabled(True)
-        self._set_status("Complete ✓" if ok else "Cancelled")
+        if not paths:
+            self._set_status("Nothing to plot — draw something first")
+            return
+        self._set_status(f"Sending {len(paths)} paths to Plotter…")
+        self.plot_navigate.emit(paths)
 
     def receive_strokes(self, strokes: list):
         self._canvas.add_paths_norm(strokes)

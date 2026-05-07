@@ -46,11 +46,13 @@ class CamOverlay(QWidget):
         if frame is None:
             self._pixmap = None
         else:
-            # Keep _rgb_buf alive so the QImage pointer stays valid until fromImage copies it
-            self._rgb_buf = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = self._rgb_buf.shape[:2]
-            qi = QImage(self._rgb_buf.data, w, h, self._rgb_buf.strides[0], QImage.Format_RGB888)
-            self._pixmap = QPixmap.fromImage(qi)
+            # Scale DOWN to display size in OpenCV before touching Qt —
+            # processes 220×165 px instead of 640×480 px, eliminates paint-time scaling
+            small = cv2.resize(frame, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
+            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            self._pixmap = QPixmap.fromImage(
+                QImage(rgb.tobytes(), CAM_W, CAM_H, CAM_W * 3, QImage.Format_RGB888)
+            )
         self.update()
 
     def set_face_landmarks(self, lms: list):
@@ -82,9 +84,8 @@ class CamOverlay(QWidget):
         painter.setClipPath(clip)
 
         if self._pixmap:
-            scaled = self._pixmap.scaled(w, h, Qt.KeepAspectRatioByExpanding,
-                                          Qt.SmoothTransformation)
-            painter.drawPixmap((w - scaled.width()) // 2, (h - scaled.height()) // 2, scaled)
+            # Pixmap is already pre-scaled to (w, h) — draw directly, no runtime scaling
+            painter.drawPixmap(0, 0, self._pixmap)
 
             if self._face_lms:
                 painter.setPen(Qt.NoPen)
@@ -141,6 +142,7 @@ class TrackingCanvas(QWidget):
         self._bg_cache: QPixmap | None = None
         self._strokes_cache: QPixmap | None = None
         self._last_plot: tuple[float, float] = (0.0, 0.0)
+        self._plotting_in_progress = False
 
         # Throttled plotter update
         self._plot_timer = QTimer(self)
@@ -167,12 +169,12 @@ class TrackingCanvas(QWidget):
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return
-        margin = 12
-        # Clamp so the overlay is always fully within the canvas
-        x = max(0, min(w - CAM_W - margin, w - CAM_W))
-        y = max(0, min(h - CAM_H - margin, h - CAM_H))
+        margin = 14
+        # Pin to TOP-RIGHT — always fully visible regardless of window/monitor height
+        x = max(0, w - CAM_W - margin)
+        y = margin
         self._cam.move(x, y)
-        self._cam.raise_()   # keep on top of paint layer
+        self._cam.raise_()
 
     # ── cursor / pen ──────────────────────────────────────────────────────────
 
@@ -249,9 +251,18 @@ class TrackingCanvas(QWidget):
             return
         self._last_plot = (x_mm, y_mm)
         feed = self._plotter.settings.get("feed_draw", 1500)
-        # Non-blocking: plotter send_gcode is already thread-safe
-        threading.Thread(target=self._plotter.move_to,
-                         args=(x_mm, y_mm, feed), daemon=True).start()
+        
+        if self._plotting_in_progress:
+            return
+
+        def _do_plot():
+            self._plotting_in_progress = True
+            try:
+                self._plotter.move_to(x_mm, y_mm, feed)
+            finally:
+                self._plotting_in_progress = False
+
+        threading.Thread(target=_do_plot, daemon=True).start()
 
     def plot_canvas(self):
         """Send all drawn strokes to the plotter (Design → Plot flow)."""

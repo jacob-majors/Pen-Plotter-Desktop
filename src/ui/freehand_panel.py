@@ -83,8 +83,8 @@ class ToolButton(QPushButton):
 
 class DrawingCanvas(QWidget):
 
-    def __init__(self, plotter):
-        super().__init__()
+    def __init__(self, plotter, parent=None):
+        super().__init__(parent)
         self.plotter = plotter
         self.setMinimumSize(500, 400)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -552,7 +552,7 @@ class FreehandPanel(QWidget):
     def __init__(self, plotter):
         super().__init__()
         self.plotter = plotter
-        self._canvas = DrawingCanvas(plotter)
+        self._canvas = DrawingCanvas(plotter, self)
         self._text_bar = TextSettingsBar()
         self._text_bar.hide()
         self._build_ui()
@@ -639,33 +639,92 @@ class FreehandPanel(QWidget):
         hlay.addWidget(self.lbl_hint)
         hlay.addStretch()
 
-        btn_plot = QPushButton("▶  Plot Pattern")
-        btn_plot.setObjectName("btnPrimary")
-        btn_plot.setStyleSheet("""
-            QPushButton { 
-                padding: 8px 24px;
-                font-size: 13px;
-            }
-        """)
-        btn_plot.clicked.connect(self._plot)
-        hlay.addWidget(btn_plot)
-
+        hlay.addStretch()
+        # btn_plot removed from here
         clay.addWidget(header)
         clay.addWidget(self._text_bar)
         clay.addWidget(self._canvas, stretch=1)
 
+        # ── footer — Plot button with estimate ────────────────────────────────
+        footer = QFrame()
+        footer.setFixedHeight(64)
+        footer.setStyleSheet("background: #0f172a; border-top: 1px solid #1e293b;")
+        flay = QHBoxLayout(footer)
+        flay.setContentsMargins(20, 0, 20, 0)
+        
+        self.lbl_estimate = QLabel("Ready to plot  ·  0 mm total")
+        self.lbl_estimate.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        flay.addWidget(self.lbl_estimate)
+        
+        flay.addStretch()
+        
+        btn_start = QPushButton("▶  Start Plot")
+        btn_start.setObjectName("btnPrimary")
+        btn_start.setMinimumWidth(160)
+        btn_start.clicked.connect(self._plot)
+        flay.addWidget(btn_start)
+        
+        clay.addWidget(footer)
+        
         root.addWidget(center)
+        
+        # Periodic estimate update
+        self._est_timer = QTimer(self)
+        self._est_timer.timeout.connect(self._update_estimate)
+        self._est_timer.start(1000)
+
+    def _update_estimate(self):
+        paths = self._canvas.shapes_as_paths()
+        if not paths:
+            self.lbl_estimate.setText("Ready to plot  ·  Canvas empty")
+            return
+            
+        dist_draw = 0.0
+        dist_travel = 0.0
+        last_pt = (0, 0)
+        
+        for path in paths:
+            dist_travel += math.hypot(path[0][0] - last_pt[0], path[0][1] - last_pt[1])
+            for i in range(1, len(path)):
+                dist_draw += math.hypot(path[i][0] - path[i-1][0], path[i][1] - path[i-1][1])
+            last_pt = path[-1]
+            
+        s = self.plotter.settings
+        f_draw = s.get("feed_draw", 1500)
+        f_travel = s.get("feed_travel", 5000)
+        
+        minutes = (dist_draw / f_draw) + (dist_travel / f_travel)
+        sec = int(minutes * 60)
+        
+        self.lbl_estimate.setText(
+            f"Estimated Time: {sec // 60}:{sec % 60:02d}  ·  "
+            f"Total Distance: {int(dist_draw + dist_travel)} mm"
+        )
 
     def _plot(self):
-        if not self.plotter.connected:
+        """Send paths to the plotter via the main app's preview/plot flow."""
+        paths = self._canvas.shapes_as_paths()
+        if not paths:
             return
-        for path in self._canvas.shapes_as_paths():
-            if not path:
-                continue
-            self.plotter.send_gcode("G90")
-            self.plotter.send_gcode("G0 Z5")
-            self.plotter.send_gcode(f"G0 X{path[0][0]:.2f} Y{path[0][1]:.2f} F3000")
-            self.plotter.send_gcode("G0 Z-2")
+        # We find the top-level window/app to call start_plot_preview
+        # Alternatively, we emit a signal. For now, we'll try to find it on the parent.
+        # PlotterPanel is usually another tab. The 'main' app has the method.
+        # In this architecture, we expect the main window to have set up connections.
+        
+        # Emit signal would be better, but let's try direct access if available
+        # or just use self.plotter directly (original logic) but improved.
+        if hasattr(self.window(), "plotter_tab"):
+            self.window().plotter_tab.start_plot_preview(paths)
+            self.window().tabs.setCurrentIndex(1) # Switch to Plotter tab
+        else:
+            # Fallback to direct plotting
+            threading.Thread(target=self._run_plot_direct, args=(paths,), daemon=True).start()
+
+    def _run_plot_direct(self, paths):
+        for path in paths:
+            self.plotter.pen_up()
+            self.plotter.move_to(path[0][0], path[0][1])
+            self.plotter.pen_down()
             for x, y in path[1:]:
-                self.plotter.send_gcode(f"G1 X{x:.2f} Y{y:.2f} F1500")
-        self.plotter.send_gcode("G0 Z5")
+                self.plotter.move_to(x, y, self.plotter.settings.get("feed_draw", 1500))
+        self.plotter.pen_up()

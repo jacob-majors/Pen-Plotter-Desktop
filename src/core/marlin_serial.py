@@ -20,8 +20,8 @@ DEFAULT_SETTINGS: dict = {
     "feed_draw": 1500,
     "soft_limits": True,
     "servo_settle_ms":  150,  # ms to wait after pen_up/pen_down before next move
-    "servo_up_angle":    90,  # degrees — pen lifted
-    "servo_down_angle":  30,  # degrees — pen on paper
+    "servo_up_angle":    35,  # degrees — pen lifted
+    "servo_down_angle":  100, # degrees — pen on paper
 }
 
 # Matches X or Y coordinate values inside a G-code line
@@ -99,8 +99,15 @@ class MarlinPlotter:
         if self.connected:
             self.disconnect()
         try:
-            self.ser = serial.Serial(port, baudrate, timeout=2)
-            time.sleep(2)
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = baudrate
+            ser.timeout = 2
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            self.ser = ser
+            time.sleep(1) # wait for firmware to breathe
             self.ser.flushInput()
             self.connected = True
             return True

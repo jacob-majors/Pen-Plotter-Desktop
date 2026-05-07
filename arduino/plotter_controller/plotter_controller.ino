@@ -49,8 +49,8 @@ const int EEPROM_MAGIC_ADDR = 2;   // 0xAB means angles have been saved
 const byte EEPROM_MAGIC     = 0xAB;
 
 // ── Default angles (degrees) — adjust to match your servo/arm geometry ───────
-const int DEFAULT_UP   = 90;
-const int DEFAULT_DOWN = 30;
+const int POSITION_1 = 35;  // Pen UP
+const int POSITION_2 = 100; // Pen DOWN
 
 // ── Runtime state ────────────────────────────────────────────────────────────
 Servo penServo;
@@ -67,8 +67,8 @@ void setup() {
     penUpAngle   = EEPROM.read(EEPROM_UP_ADDR);
     penDownAngle = EEPROM.read(EEPROM_DOWN_ADDR);
   } else {
-    penUpAngle   = DEFAULT_UP;
-    penDownAngle = DEFAULT_DOWN;
+    penUpAngle   = POSITION_1;
+    penDownAngle = POSITION_2;
   }
 
   penServo.attach(SERVO_PIN);

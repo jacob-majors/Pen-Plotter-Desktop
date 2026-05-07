@@ -28,7 +28,9 @@ class HandTracker(QObject):
     hand_landmarks = Signal(dict)         # {"landmarks": [(nx,ny)…], "pinch": bool}
     download_progress = Signal(int)
 
-    PINCH_THRESHOLD = 0.25
+    PINCH_DOWN_THRESHOLD = 0.15  # Tighter pinch to start drawing
+    PINCH_UP_THRESHOLD   = 0.60  # Fully open hand to stop drawing
+    SMOOTHING_ALPHA      = 0.35  # Smoothing factor for position (0-1)
 
     def __init__(self):
         super().__init__()
@@ -40,6 +42,8 @@ class HandTracker(QObject):
         self._thread = None
         self._landmarker = None
         self._pinch_active = False
+        self._last_nx = 0.5
+        self._last_ny = 0.5
 
     # ── model ───────────────────────────────────────────────────��─────────────
 
@@ -144,6 +148,9 @@ class HandTracker(QObject):
         options = mp_vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
             num_hands=1,
+            min_hand_detection_confidence=0.6,
+            min_hand_presence_confidence=0.6,
+            min_tracking_confidence=0.6,
             running_mode=mp_vision.RunningMode.IMAGE,
         )
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
@@ -189,7 +196,10 @@ class HandTracker(QObject):
 
         if self._tracking_enabled:
             palm = lms[MIDDLE_MCP]
-            self.hand_position.emit(float(palm.x), float(palm.y))
+            # Smoothing
+            self._last_nx = (self.SMOOTHING_ALPHA * palm.x) + (1 - self.SMOOTHING_ALPHA) * self._last_nx
+            self._last_ny = (self.SMOOTHING_ALPHA * palm.y) + (1 - self.SMOOTHING_ALPHA) * self._last_ny
+            self.hand_position.emit(float(self._last_nx), float(self._last_ny))
 
             thumb = lms[THUMB_TIP]
             index = lms[INDEX_TIP]
@@ -200,10 +210,11 @@ class HandTracker(QObject):
             pinch_dist = math.hypot(thumb.x - index.x, thumb.y - index.y)
             ratio = pinch_dist / hand_span
 
-            if ratio < self.PINCH_THRESHOLD and not self._pinch_active:
+            # Hysteresis for pinch logic
+            if ratio < self.PINCH_DOWN_THRESHOLD and not self._pinch_active:
                 self._pinch_active = True
                 self.gesture_fired.emit("pinch_down")
-            elif ratio >= self.PINCH_THRESHOLD and self._pinch_active:
+            elif ratio >= self.PINCH_UP_THRESHOLD and self._pinch_active:
                 self._pinch_active = False
                 self.gesture_fired.emit("pinch_up")
 

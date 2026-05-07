@@ -20,15 +20,15 @@ ARDUINO_SKETCH = r"""
 
 Servo penServo;
 
-const int SERVO_PIN    = 9;
-const int ESTOP_PIN    = 2;
-const int PEN_UP_DEG   = 90;   // ← adjust to your servo / plotter
-const int PEN_DOWN_DEG = 30;   // ← adjust to your servo / plotter
+const int SERVO_PIN  = 9;
+const int ESTOP_PIN  = 2;
+const int POSITION_1 = 35;  // Pen UP
+const int POSITION_2 = 100; // Pen DOWN
 
 void setup() {
   Serial.begin(9600);
   penServo.attach(SERVO_PIN);
-  penServo.write(PEN_UP_DEG);
+  penServo.write(POSITION_1);
   pinMode(ESTOP_PIN, INPUT_PULLUP);
 }
 
@@ -38,10 +38,10 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     if (cmd == "PEN_UP") {
-      penServo.write(PEN_UP_DEG);
+      penServo.write(POSITION_1);
       Serial.println("OK");
     } else if (cmd == "PEN_DOWN") {
-      penServo.write(PEN_DOWN_DEG);
+      penServo.write(POSITION_2);
       Serial.println("OK");
     }
   }
@@ -89,7 +89,17 @@ class ArduinoController(QObject):
         if self._running:
             self.disconnect()
         try:
-            self._ser = serial.Serial(port, baud, timeout=1)
+            # Open WITHOUT asserting DTR/RTS — this prevents macOS from issuing
+            # a USB reset cascade that would drop other devices (e.g. Ender 3)
+            # on the same USB root hub.
+            ser = serial.Serial()
+            ser.port     = port
+            ser.baudrate = baud
+            ser.timeout  = 1
+            ser.dtr      = False   # do NOT pulse DTR on open
+            ser.rts      = False   # do NOT pulse RTS on open
+            ser.open()
+            self._ser = ser
             self._running = True
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
